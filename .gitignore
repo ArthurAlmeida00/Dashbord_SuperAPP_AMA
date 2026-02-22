@@ -1,0 +1,13 @@
+# Pastas de Versões Antigas e Desenvolvimento
+vintage/
+__pycache__/
+venv/
+build/
+dist/
+
+# Banco de Dados Local
+ama_database.db
+
+# Cofres de Senhas (CRÍTICO: Nunca envie para o GitHub)
+.env
+.streamlit/secrets.toml
