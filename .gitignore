@@ -1,13 +1,15 @@
-# Pastas de Versões Antigas e Desenvolvimento
-vintage/
-__pycache__/
-venv/
-build/
-dist/
-
-# Banco de Dados Local
-ama_database.db
-
-# Cofres de Senhas (CRÍTICO: Nunca envie para o GitHub)
+# Ambiente e Chaves (NUNCA ENVIAR)
 .env
 .streamlit/secrets.toml
+ama_database.db
+
+# Pastas de Sistema
+__pycache__/
+venv/
+vintage/
+
+# Arquivo do Executável (Contém chaves chumbadas)
+EXE_SUPERAPPAMA.py
+dist/
+build/
+*.spec

@@ -369,18 +369,18 @@ class SuperAppAMA(ctk.CTk):
             self.entry_plantonista.focus()
 
     def avaliar_exibicao_botao_vazio(self):
-        # Consulta o banco para saber a verdade absoluta do turno atual
         hoje_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        # CORREÇÃO: Verificamos se existe algum atendimento real (atendimento_real = 1)
         self.cursor.execute(
-            "SELECT COUNT(*) FROM casos WHERE id_plantonista = ? AND turno = ? AND substr(data_hora, 1, 10) = ? AND nome != '[TURNO VAZIO]'", 
+            "SELECT COUNT(*) FROM casos WHERE id_plantonista = ? AND turno = ? AND substr(data_hora, 1, 10) = ? AND atendimento_real = 1", 
             (self.sessao_id, self.sessao_turno, hoje_str)
         )
         qtd_atendimentos = self.cursor.fetchone()[0]
 
         if qtd_atendimentos > 0:
-            self.btn_logout_vazio.pack_forget() # Extermina o botão
+            self.btn_logout_vazio.pack_forget()
         else:
-            self.btn_logout_vazio.pack(side="right") # Mantém o botão visível
+            self.btn_logout_vazio.pack(side="right")
 
     def animate_dvd(self):
         if not self.screensaver_active: 
