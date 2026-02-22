@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 # Carrega as variáveis de ambiente do arquivo .env para a memória
 load_dotenv()
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
@@ -162,10 +165,7 @@ class SuperAppAMA(ctk.CTk):
             print(f"[AVISO] Arquivo 'logo.png' não encontrado ou erro ao carregar: {e}")
         
     def sync_worker(self):
-        import os
-        SUPABASE_URL = os.getenv("SUPABASE_URL")
-        SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-        
+                
         endpoint = f"{SUPABASE_URL}/rest/v1/casos?on_conflict=id_nuvem"
         
         headers = {
@@ -552,12 +552,10 @@ class SuperAppAMA(ctk.CTk):
         # 3. Gráfico Global: Faixa Etária (Total da Base via API)
         # Rodar em thread separada seria o ideal, mas faremos direto com timeout para não travar
         try:
-            SUPABASE_URL = "https://fnxjnsmoxdjydbkechkm.supabase.co"
-            SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." # Use sua chave completa aqui
             headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-            
-            # Pedimos apenas a coluna idade para economizar banda
+
             response = requests.get(f"{SUPABASE_URL}/rest/v1/casos?select=idade", headers=headers, timeout=3)
+            
             if response.status_code == 200:
                 raw_data = response.json()
                 from collections import Counter
@@ -669,18 +667,15 @@ class SuperAppAMA(ctk.CTk):
         novo_uuid = str(uuid.uuid4()) 
 
         self.cursor.execute(
-            """INSERT INTO casos 
-            (id_nuvem, status_sync, plantonista, id_plantonista, turno, nome, idade, genero, canal, recorrencia, data_hora) 
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
+            """INSERT INTO casos
+            (id_nuvem, status_sync, plantonista, id_plantonista, turno, nome, idade, genero, canal, recorrencia, data_hora, atendimento_real) 
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""", # Adicionado atendimento_real como 1 
             (novo_uuid, self.sessao_nome, self.sessao_id, self.sessao_turno, nome, 
-             self.form_entries["idade"].get(), self.form_entries["genero"].get(), 
+             self.form_entries["idade"].get(), self.form_entries["genero"].get(),
              self.form_entries["canal"].get(), self.form_entries["recorrencia"].get(), data_hora_atual)
         )
         self.conn.commit()
-
-        # (Dentro da função save_case, após o self.conn.commit())
-        self.conn.commit()
-        
+           
         # DESTRÓI O BOTÃO IMEDIATAMENTE APÓS O PRIMEIRO CASO
         self.avaliar_exibicao_botao_vazio()
 
