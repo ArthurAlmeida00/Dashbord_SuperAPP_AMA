@@ -2,7 +2,7 @@
 
 A data-driven application built to support *AMA (Amigos Anônimos), an organization dedicated to **suicide prevention and emotional support*.
 
-This project helps AMA monitor and analyze the number of support interactions handled by volunteer responders across phone lines and digital channels. By organizing attendance data by *time period, the system enables the identification of **peak demand hours*, improving volunteer allocation and operational planning.
+This project helps AMA monitor and analyze the number of support interactions handled by volunteer responders across phone lines and digital channels. By organizing attendance data by time period, the system enables the identification of peak demand hours, improving volunteer allocation and operational planning.
 
 ---
 
