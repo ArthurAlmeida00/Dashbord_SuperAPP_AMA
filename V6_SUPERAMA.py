@@ -8,10 +8,9 @@ from tkinter import messagebox
 import uuid
 import requests
 from PIL import Image
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 from dotenv import load_dotenv
+import webbrowser
 
 # Carrega as variáveis de ambiente do arquivo .env para a memória
 load_dotenv()
@@ -301,8 +300,12 @@ class SuperAppAMA(ctk.CTk):
         self.lbl_user_status.configure(text=f"Plantonista: {self.usuario_logado}")
         
         # (Final da função process_login)
-        self.usuario_logado = f"{self.sessao_nome} ({self.sessao_id})"
-        self.lbl_user_status.configure(text=f"Plantonista: {self.usuario_logado}")
+        self.usuario_logado = f"{self.sessao_nome} (ID: {self.sessao_id})"
+        # Adicionamos um \n para forçar o nome do voluntário para a linha de baixo
+        self.lbl_user_status.configure(text=f"Plantonista Atual:\n{self.usuario_logado}")
+        
+        # CHECAGEM DE SEGURANÇA AQUI
+        self.avaliar_exibicao_botao_vazio()
                 
         # CHECAGEM DE SEGURANÇA AQUI
         self.avaliar_exibicao_botao_vazio()
@@ -429,24 +432,27 @@ class SuperAppAMA(ctk.CTk):
             "view": self.btn_nav_view
         }
         
+        # --- RODAPÉ DA BARRA LATERAL ---
         footer = ctk.CTkFrame(sidebar, fg_color="transparent")
-        footer.pack(side="bottom", fill="x", pady=20, padx=20)
+        # Aumentamos o pady inferior de 20 para 30 para desgrudar do chão da janela
+        footer.pack(side="bottom", fill="x", pady=(10, 30), padx=20)
 
         self.switch_theme = ctk.CTkSwitch(footer, text="Modo Escuro", font=ctk.CTkFont(size=16), command=self.toggle_theme)
-        self.switch_theme.pack(anchor="w", pady=(0, 20))
+        self.switch_theme.pack(anchor="w", pady=(0, 25))
         self.switch_theme.select()
 
         self.lbl_user_status = ctk.CTkLabel(
             footer, 
             text="Usuário: Não Logado", 
-            font=ctk.CTkFont(size=14, slant="italic"), 
+            font=ctk.CTkFont(size=16, slant="italic"), # Aumentamos levemente a fonte
             anchor="w", 
             text_color="gray60",
             wraplength=280,
             justify="left"
         )
+        # Um único pack com margem superior para afastar do botão de tema escuro
         self.lbl_user_status.pack(fill="x", pady=(5, 0))
-        self.lbl_user_status.pack(fill="x")
+        #self.lbl_user_status.pack(fill="x")
 
         right_panel = ctk.CTkFrame(app_frame, fg_color="transparent")
         right_panel.pack(side="right", fill="both", expand=True)
@@ -488,10 +494,10 @@ class SuperAppAMA(ctk.CTk):
         self.content_frames["dashboard"] = frame
         
         ctk.CTkLabel(frame, text="Visão Geral", font=ctk.CTkFont(size=36, weight="bold"), anchor="w").pack(fill="x", padx=40, pady=(40, 10))
-        ctk.CTkLabel(frame, text="Métricas reais extraídas do banco de dados.", font=ctk.CTkFont(size=18), text_color="gray50", anchor="w").pack(fill="x", padx=40)
+        ctk.CTkLabel(frame, text="Resumo rápido do seu plantão local.", font=ctk.CTkFont(size=18), text_color="gray50", anchor="w").pack(fill="x", padx=40)
 
         stats_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        stats_frame.pack(fill="x", padx=40, pady=20)
+        stats_frame.pack(fill="x", padx=40, pady=40)
         
         card1 = ctk.CTkFrame(stats_frame, height=120)
         card1.pack(side="left", fill="x", expand=True, padx=(0, 10))
@@ -511,98 +517,37 @@ class SuperAppAMA(ctk.CTk):
         self.lbl_dash_total_ong = ctk.CTkLabel(card3, text="0", font=ctk.CTkFont(size=40, weight="bold"))
         self.lbl_dash_total_ong.pack()
 
-        # NOVO: Espaço reservado para o gráfico pesado do matplotlib
-        self.chart_frame = ctk.CTkFrame(frame, fg_color=("gray90", "gray13"), corner_radius=10)
-        self.chart_frame.pack(fill="both", expand=True, padx=40, pady=(0, 40))
-        self.chart_canvas = None
+        # O Atalho para o Painel Gerencial
+        btn_abrir_web = ctk.CTkButton(
+            frame, 
+            text="🌐 Acessar Painel Gerencial Completo (Web)", 
+            font=ctk.CTkFont(size=22, weight="bold"), 
+            height=70,
+            fg_color="#1f538d",
+            hover_color="#14375e",
+            command=lambda: webbrowser.open("https://amadashboard.streamlit.app/")
+        )
+        btn_abrir_web.pack(pady=30, padx=40, fill="x")
 
     def update_dashboard_metrics(self):
         if not self.sessao_id: return
         hoje_str = datetime.datetime.now().strftime("%Y-%m-%d")
 
-        # 1. Métricas de Texto (Rápido)
+        # Busca puramente no banco local, sem requisições pesadas à API
         self.cursor.execute("SELECT COUNT(*) FROM casos")
         self.lbl_dash_total_ong.configure(text=str(self.cursor.fetchone()[0]))
 
         self.cursor.execute("SELECT COUNT(*) FROM casos WHERE id_plantonista = ?", (self.sessao_id,))
         self.lbl_dash_total_user.configure(text=str(self.cursor.fetchone()[0]))
 
-        self.cursor.execute("SELECT COUNT(*) FROM casos WHERE id_plantonista = ? AND substr(data_hora, 1, 10) = ?", (self.sessao_id, hoje_str))
+        # Atualizado para contar apenas atendimentos reais (ignora os turnos vazios)
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM casos WHERE id_plantonista = ? AND substr(data_hora, 1, 10) = ? AND atendimento_real = 1", 
+            (self.sessao_id, hoje_str)
+        )
         self.lbl_dash_hoje.configure(text=str(self.cursor.fetchone()[0]))
 
-        # Limpa o frame de gráficos para reconstrução
-        for widget in self.chart_frame.winfo_children():
-            widget.destroy()
-
-        # Cria dois containers internos para os gráficos ficarem lado a lado
-        left_chart = ctk.CTkFrame(self.chart_frame, fg_color="transparent")
-        left_chart.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-        
-        right_chart = ctk.CTkFrame(self.chart_frame, fg_color="transparent")
-        right_chart.pack(side="right", fill="both", expand=True, padx=10, pady=10)
-
-        # 2. Gráfico Local: Canais (Turno Atual)
-        self.cursor.execute(
-            "SELECT canal, COUNT(*) FROM casos WHERE id_plantonista = ? AND turno = ? GROUP BY canal", 
-            (self.sessao_id, self.sessao_turno)
-        )
-        dados_turno = self.cursor.fetchall()
-        self.render_pie_chart(left_chart, dados_turno, "Canais (Seu Turno)")
-
-        # 3. Gráfico Global: Faixa Etária (Total da Base via API)
-        # Rodar em thread separada seria o ideal, mas faremos direto com timeout para não travar
-        try:
-            headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-
-            response = requests.get(f"{SUPABASE_URL}/rest/v1/casos?select=idade", headers=headers, timeout=3)
-            
-            if response.status_code == 200:
-                raw_data = response.json()
-                from collections import Counter
-                contagem = Counter([item['idade'] for item in raw_data])
-                dados_globais = list(contagem.items())
-                self.render_pie_chart(right_chart, dados_globais, "Faixa Etária (Total ONG)")
-            else:
-                ctk.CTkLabel(right_chart, text="Erro ao carregar dados globais").pack(pady=50)
-        except Exception as e:
-            ctk.CTkLabel(right_chart, text="Sem conexão com a nuvem").pack(pady=50)
-
-    def render_pie_chart(self, master_frame, dados, titulo):
-        """Função auxiliar para renderizar gráficos com legenda e limpeza de memória"""
-        if not dados:
-            ctk.CTkLabel(master_frame, text=f"Sem dados: {titulo}", text_color="gray50").pack(pady=50)
-            return
-
-        ctk.CTkLabel(master_frame, text=titulo, font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(5,0))
-        
-        labels = [f"{row[0]} ({row[1]})" for row in dados] # Legenda agora inclui o número
-        sizes = [row[1] for row in dados]
-        
-        bg_color = '#212121' if ctk.get_appearance_mode() == "Dark" else '#e5e5e5'
-        text_color = 'white' if ctk.get_appearance_mode() == "Dark" else 'black'
-
-        fig, ax = plt.subplots(figsize=(3, 3), facecolor=bg_color)
-        # Explode a primeira fatia levemente para dar destaque
-        patches, texts, autotexts = ax.pie(
-            sizes, 
-            autopct='%1.1f%%', 
-            startangle=90, 
-            textprops={'color': text_color, 'fontsize': 8}
-        )
-        
-        # Adiciona a legenda lateral
-        ax.legend(patches, labels, title="Categorias", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), 
-                  fontsize=7, frameon=False, labelcolor=text_color)
-        
-        ax.axis('equal') 
-        fig.patch.set_alpha(0.0)
-        plt.tight_layout()
-
-        canvas = FigureCanvasTkAgg(fig, master=master_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-        plt.close(fig)
-
+    
     def create_insert_content(self):
         frame = ctk.CTkFrame(self.content_area, fg_color="transparent")
         self.content_frames["insert"] = frame
