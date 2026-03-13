@@ -1,14 +1,21 @@
-# Ambiente e Chaves (NUNCA ENVIAR)
+# --- Segredos e Configurações ---
 .env
 .streamlit/secrets.toml
-ama_database.db
 
-# Pastas de Sistema
+# --- Dados Locais (NUNCA ENVIAR) ---
+# Protege as informações dos atendimentos e o registro de ponto dos voluntários
+ama_database.db
+planilha_ponto_plantonistas.csv
+vintage
+.streamlit
+
+# --- Lixo de Execução e Sistema ---
 __pycache__/
 venv/
-vintage/
+.vscode/
 
-# Arquivo do Executável (Contém chaves chumbadas)
+# --- Arquivos do Executável ---
+# Protege o script que contém as chaves 'chumbadas'
 EXE_SUPERAPPAMA.py
 dist/
 build/
