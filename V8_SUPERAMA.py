@@ -7,17 +7,7 @@ import datetime
 import csv
 from tkinter import messagebox
 import uuid
-import requests
 from PIL import Image
-import os
-from dotenv import load_dotenv
-import webbrowser
-
-# Carrega as variáveis de ambiente do arquivo .env para a memória
-load_dotenv()
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -50,9 +40,6 @@ class SuperAppAMA(ctk.CTk):
         self.bind_all("<Any-Button>", self.reset_idle_timer)
         self.bind_all("<Motion>", self.reset_idle_timer)
         self.reset_idle_timer()
-
-        self.sync_thread = threading.Thread(target=self.sync_worker, daemon=True)
-        self.sync_thread.start()
 
         self.show_main_frame("login")
 
@@ -113,10 +100,17 @@ class SuperAppAMA(ctk.CTk):
                 id_plantonista TEXT NOT NULL,
                 data_acesso TEXT NOT NULL,
                 hora_acesso TEXT NOT NULL,
+                hora_encerramento TEXT,
                 turno TEXT NOT NULL,
                 UNIQUE(plantonista, id_plantonista, data_acesso, turno)
             )
         ''')
+
+        # Migração segura para bases antigas sem a coluna de encerramento
+        self.cursor.execute("PRAGMA table_info(pontos_plantonistas)")
+        colunas_ponto = [col[1] for col in self.cursor.fetchall()]
+        if "hora_encerramento" not in colunas_ponto:
+            self.cursor.execute("ALTER TABLE pontos_plantonistas ADD COLUMN hora_encerramento TEXT")
 
         self.conn.commit()
 
@@ -137,15 +131,65 @@ class SuperAppAMA(ctk.CTk):
 
     def exportar_planilha_ponto_csv(self):
         self.cursor.execute(
-            """SELECT plantonista, id_plantonista, data_acesso, hora_acesso, turno
+            """SELECT plantonista, id_plantonista, id_plantonista, data_acesso, hora_acesso, hora_encerramento, turno
                FROM pontos_plantonistas
                ORDER BY data_acesso DESC, hora_acesso DESC"""
         )
-        linhas = self.cursor.fetchall()
+        linhas_brutas = self.cursor.fetchall()
+        linhas = []
+        for plantonista, id_coluna, id_plantonista, data_acesso, hora_acesso, hora_encerramento, turno in linhas_brutas:
+            id_formatado = f'="{str(id_coluna)}"'
+            id_plantonista_formatado = f'="{str(id_plantonista)}"'
+            linhas.append(
+                (plantonista, id_formatado, id_plantonista_formatado, data_acesso, hora_acesso, hora_encerramento, turno)
+            )
 
         with open("planilha_ponto_plantonistas.csv", "w", newline="", encoding="utf-8-sig") as arquivo:
             writer = csv.writer(arquivo)
-            writer.writerow(["Plantonista", "ID", "Data do Acesso", "Hora do Acesso", "Turno"])
+            writer.writerow(["Plantonista", "ID", "ID do Plantonista", "Data do Acesso", "Hora do Acesso", "Hora do Encerramento", "Turno"])
+            writer.writerows(linhas)
+
+    def registrar_fim_turno(self):
+        if not self.sessao_id or not self.sessao_turno:
+            return
+
+        data_hoje = datetime.datetime.now().strftime("%Y-%m-%d")
+        hora_agora = datetime.datetime.now().strftime("%H:%M:%S")
+
+        self.cursor.execute(
+            """UPDATE pontos_plantonistas
+               SET hora_encerramento = ?
+               WHERE id_plantonista = ? AND turno = ? AND data_acesso = ?""",
+            (hora_agora, self.sessao_id, self.sessao_turno, data_hoje)
+        )
+        self.conn.commit()
+        self.exportar_planilha_ponto_csv()
+
+    def exportar_atendimentos_csv(self):
+        self.cursor.execute(
+            """SELECT id,
+                      plantonista,
+                      id_plantonista,
+                      turno,
+                      CASE WHEN atendimento_real = 0 THEN '' ELSE idade END AS idade,
+                      CASE WHEN atendimento_real = 0 THEN '' ELSE genero END AS genero,
+                      CASE WHEN atendimento_real = 0 THEN '' ELSE idealizacao_suicida END AS idealizacao_suicida,
+                      CASE WHEN atendimento_real = 0 THEN '' ELSE canal END AS canal,
+                      CASE WHEN atendimento_real = 0 THEN '' ELSE recorrencia END AS recorrencia,
+                      CASE WHEN atendimento_real = 0 THEN '' ELSE data_hora END AS data_hora,
+                      atendimento_real
+               FROM casos
+               ORDER BY id DESC"""
+        )
+        linhas = self.cursor.fetchall()
+
+        with open("planilha_atendimentos.csv", "w", newline="", encoding="utf-8-sig") as arquivo:
+            writer = csv.writer(arquivo)
+            writer.writerow([
+                "ID Local", "Plantonista", "ID Plantonista", "Turno",
+                "Faixa Etária", "Gênero", "Idealização Suicida", "Canal", "Recorrência",
+                "Data e Hora", "Atendimento Real"
+            ])
             writer.writerows(linhas)
 
     def show_main_frame(self, frame_name):
@@ -196,7 +240,7 @@ class SuperAppAMA(ctk.CTk):
         if hasattr(self, 'img_valida') and self.img_valida:
             ctk.CTkLabel(container, text="", image=self.logo_loading).pack(pady=(0, 20))
 
-        ctk.CTkLabel(container, text="Autenticando Plantonista e Sincronizando...", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(0, 20))
+        ctk.CTkLabel(container, text="Autenticando Plantonista...", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(0, 20))
 
         self.login_progress = ctk.CTkProgressBar(container, width=500, height=25, corner_radius=10)
         self.login_progress.pack()
@@ -218,69 +262,6 @@ class SuperAppAMA(ctk.CTk):
         except Exception as e:
             self.img_valida = False
             print(f"[AVISO] Arquivo 'logo.png' não encontrado ou erro ao carregar: {e}")
-
-    def sync_worker(self):
-
-        endpoint = f"{SUPABASE_URL}/rest/v1/casos?on_conflict=id_nuvem"
-
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates, return=minimal"
-        }
-
-        local_conn = sqlite3.connect('ama_database.db', timeout=10)
-        local_cursor = local_conn.cursor()
-
-        while True:
-            time.sleep(10)
-
-            try:
-                # O SELECT AGORA PEDE EXATAMENTE 12 COLUNAS
-                local_cursor.execute(
-                    "SELECT id, id_nuvem, plantonista, id_plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora, atendimento_real "
-                    "FROM casos WHERE status_sync = 0"
-                )
-                pendentes = local_cursor.fetchall()
-
-                if not pendentes:
-                    continue
-
-                print(f"[SYNC ALERTA] Tentando enviar {len(pendentes)} atendimento(s) retido(s) para a nuvem...")
-
-                for caso in pendentes:
-                    # O UNPACK AGORA RECEBE EXATAMENTE 12 VARIÁVEIS
-                    caso_id, id_nuvem, plantonista, id_plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora, atendimento_real = caso
-
-                    payload = {
-                        "id_nuvem": id_nuvem,
-                        "plantonista": plantonista,
-                        "id_plantonista": id_plantonista,
-                        "turno": turno,
-                        "nome": nome,
-                        "idade": idade,
-                        "genero": genero,
-                        "idealizacao_suicida": idealizacao_suicida,
-                        "canal": canal,
-                        "recorrencia": recorrencia,
-                        "data_hora": data_hora,
-                        "atendimento_real": atendimento_real
-                    }
-
-                    response = requests.post(endpoint, headers=headers, json=payload)
-
-                    if response.status_code in (200, 201):
-                        local_cursor.execute("UPDATE casos SET status_sync = 1 WHERE id = ?", (caso_id,))
-                        local_conn.commit()
-                        print(f"[SYNC OK] Atendimento {id_nuvem[:8]}... salvo no Supabase com sucesso!")
-                    else:
-                        print(f"[SYNC FALHA] Erro {response.status_code} na nuvem. Motivo: {response.text}")
-
-            except sqlite3.OperationalError as e:
-                print(f"[SYNC ERRO DE BANCO] O banco local está desatualizado. Delete o arquivo ama_database.db! Erro: {e}")
-            except Exception as e:
-                print(f"[SYNC ERRO CRÍTICO] Falha interna no motor: {e}")
 
     def create_login_screen(self):
         frame = ctk.CTkFrame(self)
@@ -396,8 +377,15 @@ class SuperAppAMA(ctk.CTk):
             self.show_content_frame("dashboard")
 
     def process_logout(self):
-        resposta = messagebox.askyesno("Encerrar Turno", "Tem certeza que deseja encerrar o turno e sair?", icon='warning')
-        if resposta:
+        if self.is_admin:
+            resposta_admin = messagebox.askyesno(
+                "Sair do Aplicativo",
+                "Tem certeza de que deseja sair?",
+                icon='warning'
+            )
+            if not resposta_admin:
+                return
+
             self.sessao_nome = ""
             self.sessao_id = ""
             self.sessao_turno = ""
@@ -409,6 +397,93 @@ class SuperAppAMA(ctk.CTk):
 
             self.show_main_frame("login")
             self.entry_plantonista.focus()
+            return
+
+        data_hoje = datetime.datetime.now().strftime("%Y-%m-%d")
+        self.cursor.execute(
+            """SELECT hora_encerramento
+               FROM pontos_plantonistas
+               WHERE id_plantonista = ? AND turno = ? AND data_acesso = ?
+               LIMIT 1""",
+            (self.sessao_id, self.sessao_turno, data_hoje)
+        )
+        ponto_atual = self.cursor.fetchone()
+        turno_ja_encerrado = bool(ponto_atual and ponto_atual[0])
+
+        if turno_ja_encerrado:
+            resposta_simples = messagebox.askyesno(
+                "Sair do Aplicativo",
+                "Tem certeza de que deseja sair?",
+                icon='warning'
+            )
+            if not resposta_simples:
+                return
+
+            self.sessao_nome = ""
+            self.sessao_id = ""
+            self.sessao_turno = ""
+            self.usuario_logado = ""
+            self.is_admin = False
+
+            self.entry_plantonista.delete(0, "end")
+            self.entry_id.delete(0, "end")
+
+            self.show_main_frame("login")
+            self.entry_plantonista.focus()
+            return
+
+        resposta = self.show_logout_options_dialog()
+
+        # Cancelar = voltar ao aplicativo sem ação
+        if resposta == "cancelar":
+            return
+
+        # Fechar Turno = encerra turno e marca horário de fim
+        if resposta == "fechar_turno":
+            self.registrar_fim_turno()
+
+        # Fechar Turno ou Sair = efetiva logout
+        self.sessao_nome = ""
+        self.sessao_id = ""
+        self.sessao_turno = ""
+        self.usuario_logado = ""
+        self.is_admin = False
+
+        self.entry_plantonista.delete(0, "end")
+        self.entry_id.delete(0, "end")
+
+        self.show_main_frame("login")
+        self.entry_plantonista.focus()
+
+    def show_logout_options_dialog(self):
+        resultado = {"valor": "cancelar"}
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("Encerrar Turno")
+        modal.geometry("430x210")
+        modal.grab_set()
+        modal.resizable(False, False)
+
+        ctk.CTkLabel(
+            modal,
+            text="Tem certeza que deseja sair?",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(pady=(28, 20))
+
+        botoes = ctk.CTkFrame(modal, fg_color="transparent")
+        botoes.pack(pady=(0, 20))
+
+        def definir(valor):
+            resultado["valor"] = valor
+            modal.destroy()
+
+        ctk.CTkButton(botoes, text="Fechar Turno", width=120, command=lambda: definir("fechar_turno")).pack(side="left", padx=6)
+        ctk.CTkButton(botoes, text="Sair", width=90, command=lambda: definir("sair")).pack(side="left", padx=6)
+        ctk.CTkButton(botoes, text="Cancelar", width=100, fg_color="gray40", command=lambda: definir("cancelar")).pack(side="left", padx=6)
+
+        modal.protocol("WM_DELETE_WINDOW", lambda: definir("cancelar"))
+        self.wait_window(modal)
+        return resultado["valor"]
 
     def process_logout_vazio(self):
         if self.is_admin:
@@ -419,7 +494,6 @@ class SuperAppAMA(ctk.CTk):
 
         if resposta:
             # Injeta o registro fantasma padronizado
-            data_hora_atual = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             novo_uuid = str(uuid.uuid4())
 
             self.cursor.execute(
@@ -427,9 +501,11 @@ class SuperAppAMA(ctk.CTk):
                 (id_nuvem, status_sync, plantonista, id_plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora, atendimento_real)
                 VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (novo_uuid, self.sessao_nome, self.sessao_id, self.sessao_turno,
-                 "N/A", "N/A", "N/A", "Não", "Sistema", "Registro de Ponto", data_hora_atual)
+                 "N/A", "", "", "", "", "", "")
             )
             self.conn.commit()
+            self.registrar_fim_turno()
+            self.exportar_atendimentos_csv()
 
             # Limpa a sessão e volta pro login
             self.sessao_nome = ""
@@ -596,25 +672,13 @@ class SuperAppAMA(ctk.CTk):
 
         card3 = ctk.CTkFrame(stats_frame, height=120)
         card3.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        ctk.CTkLabel(card3, text="Total Histórico (ONG)", font=ctk.CTkFont(size=18)).pack(pady=(15, 5))
+        ctk.CTkLabel(card3, text="Total Histórico (AMA)", font=ctk.CTkFont(size=18)).pack(pady=(15, 5))
         self.lbl_dash_total_ong = ctk.CTkLabel(card3, text="0", font=ctk.CTkFont(size=40, weight="bold"))
         self.lbl_dash_total_ong.pack()
 
-        # O Atalho para o Painel Gerencial (posicionado mais acima)
-        btn_abrir_web = ctk.CTkButton(
-            frame,
-            text="🌐 Acessar Painel Gerencial Completo (Web)",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            height=72,
-            fg_color="#1f538d",
-            hover_color="#14375e",
-            command=lambda: webbrowser.open("https://amadashboard.streamlit.app/")
-        )
-        btn_abrir_web.pack(pady=(5, 18), padx=40, fill="x")
-
         # Resumo por canal (usuário vs ONG)
         canais_frame = ctk.CTkFrame(frame)
-        canais_frame.pack(fill="x", padx=40, pady=(0, 20))
+        canais_frame.pack(fill="x", padx=40, pady=(20, 20))
 
         ctk.CTkLabel(
             canais_frame,
@@ -653,7 +717,7 @@ class SuperAppAMA(ctk.CTk):
         hoje_str = datetime.datetime.now().strftime("%Y-%m-%d")
 
         # Busca puramente no banco local, sem requisições pesadas à API
-        self.cursor.execute("SELECT COUNT(*) FROM casos")
+        self.cursor.execute("SELECT COUNT(*) FROM casos WHERE atendimento_real = 1")
         self.lbl_dash_total_ong.configure(text=str(self.cursor.fetchone()[0]))
 
         self.cursor.execute("SELECT COUNT(*) FROM casos WHERE id_plantonista = ?", (self.sessao_id,))
@@ -695,19 +759,6 @@ class SuperAppAMA(ctk.CTk):
         font_label = ctk.CTkFont(size=22, weight="bold")
         font_input = ctk.CTkFont(size=22)
 
-        header_nome = ctk.CTkFrame(form_bg, fg_color="transparent")
-        header_nome.pack(fill="x", padx=20, pady=(15, 5))
-
-        ctk.CTkLabel(header_nome, text="Nome do Atendido:", font=font_label).pack(side="left")
-
-        self.anon_var = ctk.BooleanVar(value=False)
-        self.chk_anon = ctk.CTkCheckBox(header_nome, text="Marcar como Anônimo", font=ctk.CTkFont(size=18), variable=self.anon_var, command=self.toggle_anonimo)
-        self.chk_anon.pack(side="right")
-
-        entry_nome = ctk.CTkEntry(form_bg, height=50, font=font_input)
-        entry_nome.pack(fill="x", padx=20)
-        self.form_entries["nome"] = entry_nome
-
         opcoes = {
             "idade": ["Não Informado", "Menos de 18 anos", "18 a 28 anos", "29 a 40 anos", "41 a 55 anos", "56 anos ou mais"],
             "genero": ["Não informado", "Masculino", "Feminino", "Não binário"],
@@ -729,37 +780,8 @@ class SuperAppAMA(ctk.CTk):
             dropdown.pack(fill="x", padx=20)
             self.form_entries[key] = dropdown
 
-    def toggle_anonimo(self):
-        entry = self.form_entries["nome"]
-        if self.anon_var.get():
-            entry.delete(0, "end")
-            entry.insert(0, "Anônimo")
-            entry.configure(state="disabled", fg_color=("gray70", "gray30"))
-        else:
-            entry.configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
-            entry.delete(0, "end")
-
-    def toggle_anonimo_edit(self):
-        entry = self.edit_entries["nome"]
-        if self.edit_anon_var.get():
-            entry.configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
-            entry.delete(0, "end")
-            entry.insert(0, "Anônimo")
-            entry.configure(state="disabled", fg_color=("gray70", "gray30"))
-        else:
-            entry.configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
-            if entry.get().strip() == "Anônimo":
-                entry.delete(0, "end")
-
     def save_case(self):
-        nome = self.form_entries["nome"].get().strip()
-
-        if not nome:
-            messagebox.showwarning(
-                "Erro de Preenchimento",
-                "O Nome do Atendido está vazio!\n\nPor favor, digite o nome ou marque a caixa 'Marcar como Anônimo' antes de salvar."
-            )
-            return
+        nome = "Não Informado"
 
         data_hora_atual = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         novo_uuid = str(uuid.uuid4())
@@ -773,15 +795,12 @@ class SuperAppAMA(ctk.CTk):
              self.form_entries["canal"].get(), self.form_entries["recorrencia"].get(), data_hora_atual)
         )
         self.conn.commit()
+        self.exportar_atendimentos_csv()
 
         # DESTRÓI O BOTÃO IMEDIATAMENTE APÓS O PRIMEIRO CASO
         self.avaliar_exibicao_botao_vazio()
 
-        messagebox.showinfo("Sucesso", "Atendimento salvo localmente!\nSincronização em andamento.")
-
-        self.form_entries["nome"].configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
-        self.form_entries["nome"].delete(0, "end")
-        self.chk_anon.deselect()
+        messagebox.showinfo("Sucesso", "Atendimento salvo localmente e exportado para a planilha CSV.")
 
         for key in ["idade", "genero", "canal", "recorrencia", "idealizacao_suicida"]:
             valores = self.form_entries[key].cget("values")
@@ -802,29 +821,29 @@ class SuperAppAMA(ctk.CTk):
 
         if self.is_admin:
             self.cursor.execute(
-                "SELECT id, nome, canal, data_hora FROM casos WHERE atendimento_real = 1 ORDER BY id DESC"
+                "SELECT id, plantonista, canal, data_hora FROM casos WHERE atendimento_real = 1 ORDER BY id DESC"
             )
             casos = self.cursor.fetchall()
             empty_text = "Nenhum atendimento registrado no banco."
         else:
             self.cursor.execute(
-                "SELECT id, nome, canal, data_hora FROM casos WHERE id_plantonista = ? AND turno = ? ORDER BY id DESC",
-                (self.sessao_id, self.sessao_turno)
+                "SELECT id, plantonista, canal, data_hora FROM casos WHERE id_plantonista = ? AND atendimento_real = 1 ORDER BY id DESC",
+                (self.sessao_id,)
             )
             casos = self.cursor.fetchall()
-            empty_text = "Nenhum atendimento registrado neste turno."
+            empty_text = "Nenhum atendimento registrado para este plantonista."
 
         if not casos:
             ctk.CTkLabel(self.cases_scroll, text=empty_text, font=ctk.CTkFont(size=22), text_color="gray50").pack(pady=40)
         else:
             for caso in casos:
-                case_id, nome, canal, data_hora = caso
+                case_id, plantonista, canal, data_hora = caso
                 row = ctk.CTkFrame(self.cases_scroll, fg_color=("gray85", "gray20"), height=70)
                 row.pack(fill="x", pady=5, padx=10)
                 row.pack_propagate(False)
 
                 ctk.CTkLabel(row, text=f"#{case_id}", font=ctk.CTkFont(size=20)).pack(side="left", padx=15)
-                ctk.CTkLabel(row, text=nome, font=ctk.CTkFont(size=22, weight="bold")).pack(side="left", padx=15)
+                ctk.CTkLabel(row, text=plantonista, font=ctk.CTkFont(size=22, weight="bold")).pack(side="left", padx=15)
 
                 # NOVO: Os dois botões lado a lado diretamente na lista
                 btn_detalhes = ctk.CTkButton(row, text="Ver Detalhes", width=110, font=ctk.CTkFont(size=14, weight="bold"), command=lambda cid=case_id: self.show_case_details(cid))
@@ -862,14 +881,14 @@ class SuperAppAMA(ctk.CTk):
                 child.destroy()
 
         self.cursor.execute(
-            "SELECT plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora, status_sync FROM casos WHERE id = ?",
+            "SELECT plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora FROM casos WHERE id = ?",
             (case_id,)
         )
         caso = self.cursor.fetchone()
         if not caso:
             return
 
-        plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora, status_sync = caso
+        plantonista, turno, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora = caso
 
         campos = [
             ("Data e Hora", data_hora),
@@ -879,16 +898,14 @@ class SuperAppAMA(ctk.CTk):
             ("Identidade de Gênero", genero),
             ("Idealização Suicida", idealizacao_suicida),
             ("Canal de Contato", canal),
-            ("Histórico", recorrencia),
-            ("Status do Servidor", "Sincronizado na Nuvem" if status_sync == 1 else "Pendente (Salvo apenas neste PC)")
+            ("Histórico", recorrencia)
         ]
 
         for titulo, valor in campos:
             linha = ctk.CTkFrame(self.detail_scroll, fg_color="transparent")
             linha.pack(fill="x", pady=15, padx=20)
             ctk.CTkLabel(linha, text=f"{titulo}:", font=ctk.CTkFont(size=20, weight="bold"), text_color="gray50", width=250, anchor="w").pack(side="left")
-            cor_texto = "orange" if titulo == "Status do Servidor" and status_sync == 0 else ("black", "white")
-            ctk.CTkLabel(linha, text=valor, font=ctk.CTkFont(size=22), text_color=cor_texto, anchor="w").pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(linha, text=valor, font=ctk.CTkFont(size=22), text_color=("black", "white"), anchor="w").pack(side="left", fill="x", expand=True)
 
         self.show_content_frame("case_detail")
 
@@ -906,14 +923,14 @@ class SuperAppAMA(ctk.CTk):
         for widget in self.my_shifts_scroll.winfo_children():
             widget.destroy()
 
-        if not self.sessao_id:
+        if not self.sessao_id and not self.is_admin:
             ctk.CTkLabel(self.my_shifts_scroll, text="Faça login para visualizar seus turnos.", font=ctk.CTkFont(size=22), text_color="gray50").pack(pady=40)
             self.show_content_frame("my_shifts")
             return
 
         if self.is_admin:
             self.cursor.execute(
-                """SELECT plantonista, id_plantonista, data_acesso, hora_acesso, turno
+                """SELECT id, plantonista, id_plantonista, data_acesso, hora_acesso, hora_encerramento, turno
                    FROM pontos_plantonistas
                    ORDER BY data_acesso DESC, hora_acesso DESC"""
             )
@@ -921,7 +938,7 @@ class SuperAppAMA(ctk.CTk):
             empty_text = "Nenhum turno registrado no banco."
         else:
             self.cursor.execute(
-                """SELECT plantonista, id_plantonista, data_acesso, hora_acesso, turno
+                """SELECT id, plantonista, id_plantonista, data_acesso, hora_acesso, hora_encerramento, turno
                    FROM pontos_plantonistas
                    WHERE id_plantonista = ?
                    ORDER BY data_acesso DESC, hora_acesso DESC""",
@@ -936,24 +953,134 @@ class SuperAppAMA(ctk.CTk):
             header = ctk.CTkFrame(self.my_shifts_scroll, fg_color=("gray85", "gray20"), height=50)
             header.pack(fill="x", padx=10, pady=(5, 8))
             header.pack_propagate(False)
-            ctk.CTkLabel(header, text="Plantonista", font=ctk.CTkFont(size=16, weight="bold"), width=190, anchor="w").pack(side="left", padx=8)
-            ctk.CTkLabel(header, text="ID", font=ctk.CTkFont(size=16, weight="bold"), width=100, anchor="w").pack(side="left", padx=4)
-            ctk.CTkLabel(header, text="Data", font=ctk.CTkFont(size=16, weight="bold"), width=120, anchor="w").pack(side="left", padx=4)
-            ctk.CTkLabel(header, text="Hora Início", font=ctk.CTkFont(size=16, weight="bold"), width=115, anchor="w").pack(side="left", padx=4)
-            ctk.CTkLabel(header, text="Turno Realizado", font=ctk.CTkFont(size=16, weight="bold"), width=130, anchor="w").pack(side="left", padx=4)
+            w_plantonista = 135 if self.is_admin else 160
+            w_id = 70 if self.is_admin else 90
+            w_data = 90 if self.is_admin else 105
+            w_hora = 80 if self.is_admin else 95
+            w_turno = 60 if self.is_admin else 75
 
-            for plantonista, id_plantonista, data_acesso, hora_acesso, turno in turnos:
+            ctk.CTkLabel(header, text="Plantonista", font=ctk.CTkFont(size=16, weight="bold"), width=w_plantonista, anchor="w").pack(side="left", padx=6)
+            ctk.CTkLabel(header, text="ID", font=ctk.CTkFont(size=16, weight="bold"), width=w_id, anchor="w").pack(side="left", padx=3)
+            ctk.CTkLabel(header, text="Data", font=ctk.CTkFont(size=16, weight="bold"), width=w_data, anchor="w").pack(side="left", padx=3)
+            ctk.CTkLabel(header, text="Hora Início", font=ctk.CTkFont(size=16, weight="bold"), width=w_hora, anchor="w").pack(side="left", padx=3)
+            ctk.CTkLabel(header, text="Hora Saída", font=ctk.CTkFont(size=16, weight="bold"), width=w_hora, anchor="w").pack(side="left", padx=3)
+            ctk.CTkLabel(header, text="Turno", font=ctk.CTkFont(size=16, weight="bold"), width=w_turno, anchor="w").pack(side="left", padx=3)
+            if self.is_admin:
+                ctk.CTkLabel(header, text="✎", font=ctk.CTkFont(size=16, weight="bold"), width=35, anchor="w").pack(side="left", padx=4)
+
+            for registro in turnos:
+                registro_id, plantonista, id_plantonista, data_acesso, hora_acesso, hora_encerramento, turno = registro
                 row = ctk.CTkFrame(self.my_shifts_scroll, fg_color=("gray85", "gray20"), height=56)
                 row.pack(fill="x", padx=10, pady=4)
                 row.pack_propagate(False)
+                if self.is_admin:
+                    btn_editar = ctk.CTkButton(
+                        row,
+                        text="✎",
+                        width=28,
+                        height=28,
+                        corner_radius=8,
+                        command=lambda r=registro: self.open_shift_edit_modal(r)
+                    )
+                    btn_editar.pack(side="left", padx=(8, 6))
 
-                ctk.CTkLabel(row, text=plantonista, font=ctk.CTkFont(size=15), width=190, anchor="w").pack(side="left", padx=8)
-                ctk.CTkLabel(row, text=id_plantonista, font=ctk.CTkFont(size=15), width=100, anchor="w").pack(side="left", padx=4)
-                ctk.CTkLabel(row, text=data_acesso, font=ctk.CTkFont(size=15), width=120, anchor="w").pack(side="left", padx=4)
-                ctk.CTkLabel(row, text=hora_acesso, font=ctk.CTkFont(size=15), width=115, anchor="w").pack(side="left", padx=4)
-                ctk.CTkLabel(row, text=turno, font=ctk.CTkFont(size=15, weight="bold"), width=130, anchor="w", text_color="#2ecc71").pack(side="left", padx=4)
+                ctk.CTkLabel(row, text=plantonista, font=ctk.CTkFont(size=15), width=w_plantonista, anchor="w").pack(side="left", padx=6)
+                ctk.CTkLabel(row, text=id_plantonista, font=ctk.CTkFont(size=15), width=w_id, anchor="w").pack(side="left", padx=3)
+                ctk.CTkLabel(row, text=data_acesso, font=ctk.CTkFont(size=15), width=w_data, anchor="w").pack(side="left", padx=3)
+                ctk.CTkLabel(row, text=hora_acesso, font=ctk.CTkFont(size=15), width=w_hora, anchor="w").pack(side="left", padx=3)
+                ctk.CTkLabel(row, text=hora_encerramento or "-", font=ctk.CTkFont(size=15), width=w_hora, anchor="w").pack(side="left", padx=3)
+                ctk.CTkLabel(row, text=turno, font=ctk.CTkFont(size=15, weight="bold"), width=w_turno, anchor="w", text_color="#2ecc71").pack(side="left", padx=3)
+                if self.is_admin:
+                    row.bind("<Double-Button-1>", lambda _e, r=registro: self.open_shift_edit_modal(r))
 
         self.show_content_frame("my_shifts")
+
+    def open_shift_edit_modal(self, registro):
+        if not self.is_admin:
+            messagebox.showwarning("Acesso negado", "Apenas o usuário adm pode editar turnos.")
+            return
+
+        registro_id, plantonista, id_plantonista, data_acesso, hora_acesso, hora_encerramento, turno = registro
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("Editar Turno")
+        modal.geometry("560x650")
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="Editar Dados do Turno", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 8))
+
+        form = ctk.CTkFrame(modal, fg_color="transparent")
+        form.pack(fill="both", expand=True, padx=20, pady=8)
+
+        def add_field(label, value):
+            ctk.CTkLabel(form, text=label, anchor="w").pack(fill="x", pady=(8, 2))
+            entry = ctk.CTkEntry(form, height=36)
+            entry.pack(fill="x")
+            entry.insert(0, value or "")
+            return entry
+
+        entry_plantonista = add_field("Plantonista", plantonista)
+        entry_id = add_field("ID do Plantonista", id_plantonista)
+        entry_data = add_field("Data (AAAA-MM-DD)", data_acesso)
+        entry_hora_inicio = add_field("Hora de Início (HH:MM:SS)", hora_acesso)
+        entry_hora_saida = add_field("Hora de Saída (HH:MM:SS - opcional)", hora_encerramento or "")
+        entry_turno = add_field("Turno (P10, P13, P16, P19)", turno)
+
+        def salvar_edicao():
+            if not self.is_admin:
+                messagebox.showwarning("Acesso negado", "Apenas o usuário adm pode editar turnos.")
+                return
+
+            novo_plantonista = entry_plantonista.get().strip()
+            novo_id = entry_id.get().strip()
+            nova_data = entry_data.get().strip()
+            nova_hora_inicio = entry_hora_inicio.get().strip()
+            nova_hora_saida = entry_hora_saida.get().strip()
+            novo_turno = entry_turno.get().strip().upper()
+
+            if not novo_plantonista or not novo_id or not nova_data or not nova_hora_inicio or not novo_turno:
+                messagebox.showwarning("Campos obrigatórios", "Preencha os campos obrigatórios do turno.")
+                return
+
+            try:
+                datetime.datetime.strptime(nova_data, "%Y-%m-%d")
+                datetime.datetime.strptime(nova_hora_inicio, "%H:%M:%S")
+                if nova_hora_saida:
+                    datetime.datetime.strptime(nova_hora_saida, "%H:%M:%S")
+            except ValueError:
+                messagebox.showwarning("Formato inválido", "Use data AAAA-MM-DD e hora HH:MM:SS.")
+                return
+
+            try:
+                self.cursor.execute(
+                    """UPDATE pontos_plantonistas
+                       SET plantonista = ?, id_plantonista = ?, data_acesso = ?, hora_acesso = ?, hora_encerramento = ?, turno = ?
+                       WHERE id = ?""",
+                    (novo_plantonista, novo_id, nova_data, nova_hora_inicio, nova_hora_saida if nova_hora_saida else None, novo_turno, registro_id)
+                )
+                if self.cursor.rowcount == 0:
+                    messagebox.showwarning("Edição não aplicada", "Não foi possível localizar o turno para atualizar.")
+                    return
+                self.conn.commit()
+            except sqlite3.IntegrityError:
+                messagebox.showwarning(
+                    "Registro duplicado",
+                    "Já existe um turno com esse Plantonista + ID + Data + Turno. Ajuste os dados e tente novamente."
+                )
+                return
+            except Exception as e:
+                messagebox.showerror("Erro ao editar", f"Não foi possível salvar a edição do turno.\n\nDetalhes: {e}")
+                return
+
+            self.exportar_planilha_ponto_csv()
+            messagebox.showinfo("Sucesso", "Turno atualizado com sucesso.")
+            modal.destroy()
+            self.load_and_show_my_shifts()
+
+        botoes = ctk.CTkFrame(modal, fg_color="transparent")
+        botoes.pack(fill="x", padx=20, pady=(4, 20))
+        ctk.CTkButton(botoes, text="Salvar Alterações", width=180, command=salvar_edicao).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(botoes, text="Cancelar", width=120, fg_color="gray40", command=modal.destroy).pack(side="left")
 
     def build_content_screens(self):
         # Substitua a sua função build_content_screens atual por esta, adicionando a linha abaixo:
@@ -984,25 +1111,6 @@ class SuperAppAMA(ctk.CTk):
         font_label = ctk.CTkFont(size=22, weight="bold")
         font_input = ctk.CTkFont(size=22)
 
-        header_nome_edit = ctk.CTkFrame(form_bg, fg_color="transparent")
-        header_nome_edit.pack(fill="x", padx=20, pady=(15, 5))
-
-        ctk.CTkLabel(header_nome_edit, text="Nome do Atendido:", font=font_label).pack(side="left")
-
-        self.edit_anon_var = ctk.BooleanVar(value=False)
-        self.chk_anon_edit = ctk.CTkCheckBox(
-            header_nome_edit,
-            text="Marcar como Anônimo",
-            font=ctk.CTkFont(size=18),
-            variable=self.edit_anon_var,
-            command=self.toggle_anonimo_edit
-        )
-        self.chk_anon_edit.pack(side="right")
-
-        entry_nome = ctk.CTkEntry(form_bg, height=50, font=font_input)
-        entry_nome.pack(fill="x", padx=20)
-        self.edit_entries["nome"] = entry_nome
-
         ctk.CTkLabel(form_bg, text="Data e Hora do Registro (AAAA-MM-DD HH:MM:SS):", font=font_label).pack(anchor="w", padx=20, pady=(15, 5))
         entry_data_hora = ctk.CTkEntry(form_bg, height=50, font=font_input)
         entry_data_hora.pack(fill="x", padx=20)
@@ -1032,28 +1140,17 @@ class SuperAppAMA(ctk.CTk):
     def load_edit_form(self, case_id):
         """Nova lógica de roteamento: busca os dados direto do banco usando apenas o case_id"""
         self.cursor.execute(
-            "SELECT id_nuvem, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora FROM casos WHERE id = ?",
+            "SELECT id_nuvem, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora FROM casos WHERE id = ?",
             (case_id,)
         )
         caso = self.cursor.fetchone()
         if not caso:
             return
 
-        id_nuvem, nome, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora = caso
+        id_nuvem, idade, genero, idealizacao_suicida, canal, recorrencia, data_hora = caso
 
         self.current_edit_id = case_id
         self.current_edit_nuvem_id = id_nuvem
-
-        self.edit_entries["nome"].configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
-        self.edit_entries["nome"].delete(0, "end")
-
-        self.edit_entries["nome"].insert(0, nome)
-        if nome == "Anônimo":
-            self.edit_anon_var.set(True)
-            self.edit_entries["nome"].configure(state="disabled", fg_color=("gray70", "gray30"))
-        else:
-            self.edit_anon_var.set(False)
-            self.edit_entries["nome"].configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
         self.edit_entries["data_hora"].delete(0, "end")
         self.edit_entries["data_hora"].insert(0, data_hora)
         self.edit_entries["idade"].set(idade)
@@ -1065,12 +1162,7 @@ class SuperAppAMA(ctk.CTk):
         self.show_content_frame("edit_case")
 
     def save_edited_case(self):
-        nome = self.edit_entries["nome"].get().strip()
         data_hora_editada = self.edit_entries["data_hora"].get().strip()
-
-        if not nome:
-            messagebox.showwarning("Erro", "O Nome não pode ficar vazio.")
-            return
 
         try:
             datetime.datetime.strptime(data_hora_editada, "%Y-%m-%d %H:%M:%S")
@@ -1081,14 +1173,15 @@ class SuperAppAMA(ctk.CTk):
         # Atualiza o banco local e reseta o status_sync para 0 para forçar a re-sincronização
         self.cursor.execute(
             """UPDATE casos
-               SET nome = ?, data_hora = ?, idade = ?, genero = ?, idealizacao_suicida = ?, canal = ?, recorrencia = ?, status_sync = 0
+               SET data_hora = ?, idade = ?, genero = ?, idealizacao_suicida = ?, canal = ?, recorrencia = ?, status_sync = 0
                WHERE id = ?""",
-            (nome, data_hora_editada, self.edit_entries["idade"].get(), self.edit_entries["genero"].get(),
+            (data_hora_editada, self.edit_entries["idade"].get(), self.edit_entries["genero"].get(),
              self.edit_entries["idealizacao_suicida"].get(), self.edit_entries["canal"].get(), self.edit_entries["recorrencia"].get(), self.current_edit_id)
         )
         self.conn.commit()
+        self.exportar_atendimentos_csv()
 
-        messagebox.showinfo("Sucesso", "Atendimento retificado com sucesso!\nA alteração será enviada para a nuvem.")
+        messagebox.showinfo("Sucesso", "Atendimento retificado com sucesso!\nA planilha CSV foi atualizada.")
 
         # Recarrega a lista e volta para a tela de visualização
         self.load_and_show_cases()
